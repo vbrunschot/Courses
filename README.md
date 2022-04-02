@@ -1,2 +1,2 @@
 # Courses
-Notes and mindmaps created during exam preparations.
+Notes,mindmaps and cheatsheets created during exam preparations.
